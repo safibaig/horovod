@@ -1691,14 +1691,25 @@ class TorchTests(unittest.TestCase):
             for r in range(hvd.size())
         ]).cuda(hvd.local_rank()).float()
 
-        sync_bn_out = sync_bn(ts[hvd.rank()].unsqueeze(0))
-        bn_out = bn(ts)[hvd.rank()].unsqueeze(0)
-        assert (sync_bn_out - bn_out).abs().sum() < 1e-6
+        ts1 = ts.clone().requires_grad_()
+        ts2 = ts.clone().requires_grad_()
 
+        # Training
+        sync_bn_out = sync_bn(ts1[hvd.rank()].unsqueeze(0))
+        bn_out = bn(ts2)[hvd.rank()].unsqueeze(0)
+        assert (sync_bn_out - bn_out).abs().sum() < 1e-6
+        assert (sync_bn.running_mean - bn.running_mean).abs().sum() < 1e-6
+        assert (sync_bn.running_var - bn.running_var).abs().sum() < 1e-6
+
+        # Gradients
         sync_bn_out.sum().backward()
         bn_out.sum().backward()
         assert (sync_bn.weight.grad - bn.weight.grad).abs().sum() < 1e-6
         assert (sync_bn.bias.grad - bn.bias.grad).abs().sum() < 1e-6
+        # TODO: this currently fails
+        print('TS1', ts1.grad)
+        print('TS2', ts2.grad)
+        assert (ts1.grad - ts2.grad).abs().sum() < 1e-6
 
 
 if __name__ == "__main__":
