@@ -1667,6 +1667,26 @@ class TorchTests(unittest.TestCase):
                 ret = hvd.join(hvd.local_rank())
             else:
                 ret = hvd.join()
+    
+    def test_horovod_sync_batch_norm(self):
+        """Tests Horovod version of SyncBatchNorm."""
+        if not torch.cuda.is_available():
+            self.skipTest("No GPUs available")
+
+        hvd.init()
+
+        sync_bn = hvd.SyncBatchNorm(num_features=4, name='test_sync_bn')
+        sync_bn.train()
+
+        t = torch.tensor([[
+            [hvd.rank(), hvd.rank() + 1],
+            [hvd.rank() * 2, hvd.rank() * 2 + 1], 
+            [hvd.rank() * 3, hvd.rank() * 3 + 1],
+            [hvd.rank() * 4, hvd.rank() * 4 + 1]
+        ]]).float()
+
+        print(sync_bn(t))
+
 
 if __name__ == "__main__":
    unittest.main()
