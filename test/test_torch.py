@@ -1675,17 +1675,30 @@ class TorchTests(unittest.TestCase):
 
         hvd.init()
 
-        sync_bn = hvd.SyncBatchNorm(num_features=4, name='test_sync_bn')
-        sync_bn.train()
+        sync_bn = hvd.SyncBatchNorm(num_features=4)
+        sync_bn.cuda(hvd.local_rank())
 
-        t = torch.tensor([[
-            [hvd.rank(), hvd.rank() + 1],
-            [hvd.rank() * 2, hvd.rank() * 2 + 1], 
-            [hvd.rank() * 3, hvd.rank() * 3 + 1],
-            [hvd.rank() * 4, hvd.rank() * 4 + 1]
-        ]]).float()
+        bn = torch.nn.BatchNorm1d(num_features=4)
+        bn.cuda(hvd.local_rank())
 
-        print(sync_bn(t))
+        ts = torch.stack([
+            torch.tensor([
+                [r, r + 1],
+                [r * 2, r * 2 + 1],
+                [r * 3, r * 3 + 1],
+                [r * 4, r * 4 + 1]
+            ])
+            for r in range(hvd.size())
+        ]).cuda(hvd.local_rank()).float()
+
+        sync_bn_out = sync_bn(ts[hvd.rank()].unsqueeze(0))
+        bn_out = bn(ts)[hvd.rank()].unsqueeze(0)
+        assert (sync_bn_out - bn_out).abs().sum() < 1e-6
+
+        sync_bn_out.sum().backward()
+        bn_out.sum().backward()
+        assert (sync_bn.weight.grad - bn.weight.grad).abs().sum() < 1e-6
+        assert (sync_bn.bias.grad - bn.bias.grad).abs().sum() < 1e-6
 
 
 if __name__ == "__main__":

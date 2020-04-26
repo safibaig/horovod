@@ -43,9 +43,8 @@ class SyncBatchNorm(_BatchNorm):
             this module does not track such statistics and always uses batch
             statistics in both training and eval modes. Default: `True`
     """
-    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True, name=None):
+    def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True, track_running_stats=True):
         super().__init__(num_features, eps, momentum, affine, track_running_stats)
-        self.name = name
 
     def _check_input_dim(self, input):
         if input.dim() < 2:
@@ -68,27 +67,25 @@ class SyncBatchNorm(_BatchNorm):
         else:
             return _SyncBatchNorm.apply(
                 input, self.weight, self.bias, self.running_mean, self.running_var,
-                self.eps, self.momentum, self.name)
+                self.eps, self.momentum)
 
 
 class _SyncBatchNorm(Function):
     @staticmethod
-    def forward(self, input, weight, bias, running_mean, running_var, eps, momentum, name):
+    def forward(self, input, weight, bias, running_mean, running_var, eps, momentum):
         input = input.contiguous()
 
         size = input.numel() // input.size(1)
         if size == 1:
             raise ValueError('Expected more than 1 value per channel when training, got input size {}'.format(size))
-        count = torch.empty(1,
-                            dtype=running_mean.dtype,
-                            device=input.device).fill_(size)
+        count = torch.tensor([size])
 
         # calculate mean/invstd for input.
         mean, invstd = torch.batch_norm_stats(input, eps)
 
-        count_handle = allgather_async(count, name='{}.count' if name is not None else None)
-        mean_handle = allgather_async(mean, name='{}.mean' if name is not None else None)
-        invstd_handle = allgather_async(invstd, name='{}.invstd' if name is not None else None)
+        count_handle = allgather_async(count.unsqueeze(0), name='sync_batch_norm.count')
+        mean_handle = allgather_async(mean.unsqueeze(0), name='sync_batch_norm.mean')
+        invstd_handle = allgather_async(invstd.unsqueeze(0), name='sync_batch_norm.invstd')
 
         # wait on the async communication to finish
         count_all = synchronize(count_handle)
@@ -104,19 +101,18 @@ class _SyncBatchNorm(Function):
             running_var,
             momentum,
             eps,
-            count_all.view(-1)
+            count_all.view(-1).tolist()
         )
 
-        self.save_for_backward(input, weight, mean, invstd, count_all, name)
+        self.save_for_backward(input, weight, mean, invstd, count_all)
 
         # apply element-wise normalization
-        out = torch.batch_norm_elemt(input, weight, bias, mean, invstd, eps)
-        return out
+        return torch.batch_norm_elemt(input, weight, bias, mean, invstd, eps)
 
     @staticmethod
     def backward(self, grad_output):
         grad_output = grad_output.contiguous()
-        saved_input, weight, mean, invstd, count_tensor, name = self.saved_tensors
+        saved_input, weight, mean, invstd, count_tensor = self.saved_tensors
         grad_input = grad_weight = grad_bias = None
 
         # calculate local stats as well as grad_weight / grad_bias
@@ -133,8 +129,8 @@ class _SyncBatchNorm(Function):
 
         if self.needs_input_grad[0]:
             # synchronizing stats used to calculate input gradient.
-            sum_dy_handle = allreduce_async(sum_dy, name='{}.sum_dy' if name is not None else None, op=Sum)
-            sum_dy_xmu_handle = allreduce_async(sum_dy_xmu, name='{}.sum_dy' if name is not None else None, op=Sum)
+            sum_dy_handle = allreduce_async(sum_dy, op=Sum, name='sync_batch_norm.sum_dy')
+            sum_dy_xmu_handle = allreduce_async(sum_dy_xmu, op=Sum, name='sync_batch_norm.sum_dy_xmu')
 
             # wait on the async communication to finish
             sum_dy_all = synchronize(sum_dy_handle)
