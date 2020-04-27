@@ -104,7 +104,7 @@ class _SyncBatchNorm(Function):
             count_all.view(-1).tolist()
         )
 
-        self.save_for_backward(input, weight, mean, invstd, count_all)
+        self.save_for_backward(input, weight, mean, invstd)
 
         # apply element-wise normalization
         return torch.batch_norm_elemt(input, weight, bias, mean, invstd, eps)
@@ -112,11 +112,11 @@ class _SyncBatchNorm(Function):
     @staticmethod
     def backward(self, grad_output):
         grad_output = grad_output.contiguous()
-        saved_input, weight, mean, invstd, count_tensor = self.saved_tensors
+        saved_input, weight, mean, invstd = self.saved_tensors
         grad_input = grad_weight = grad_bias = None
 
         # calculate local stats as well as grad_weight / grad_bias
-        sum_dy, sum_dy_xmu, grad_weight, grad_bias = torch.batch_norm_backward_reduce(
+        mean_dy, mean_dy_xmu, grad_weight, grad_bias = torch.batch_norm_backward_reduce(
             grad_output,
             saved_input,
             mean,
@@ -129,16 +129,13 @@ class _SyncBatchNorm(Function):
 
         if self.needs_input_grad[0]:
             # synchronizing stats used to calculate input gradient.
-            sum_dy_handle = allreduce_async(sum_dy, op=Sum, name='sync_batch_norm.sum_dy')
-            sum_dy_xmu_handle = allreduce_async(sum_dy_xmu, op=Sum, name='sync_batch_norm.sum_dy_xmu')
+            mean_dy_handle = allreduce_async(mean_dy, name='sync_batch_norm.mean_dy')
+            mean_dy_xmu_handle = allreduce_async(mean_dy_xmu, name='sync_batch_norm.mean_dy_xmu')
 
             # wait on the async communication to finish
-            sum_dy_all = synchronize(sum_dy_handle)
-            sum_dy_xmu_all = synchronize(sum_dy_xmu_handle)
+            mean_dy = synchronize(mean_dy_handle)
+            mean_dy_xmu = synchronize(mean_dy_xmu_handle)
 
-            divisor = count_tensor.sum()
-            mean_dy = sum_dy_all / divisor
-            mean_dy_xmu = sum_dy_xmu_all / divisor
             # backward pass for gradient calculation
             grad_input = torch.batch_norm_backward_elemt(
                 grad_output,
