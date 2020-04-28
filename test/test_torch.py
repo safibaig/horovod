@@ -1705,7 +1705,7 @@ class TorchTests(unittest.TestCase):
         sync_bn_out.sum().backward()
         bn_out.mean(dim=0).sum().backward()
         assert (hvd.allreduce(sync_bn.weight.grad, name='sync_bn.weight.grad') - bn.weight.grad).abs().sum() < 1e-6
-        assert (hvd.allreduce(sync_bn.bias.grad, name='sync_bn.bias.grad'), - bn.bias.grad).abs().sum() < 1e-6
+        assert (hvd.allreduce(sync_bn.bias.grad, name='sync_bn.bias.grad') - bn.bias.grad).abs().sum() < 1e-6
         assert (hvd.allreduce(ts1.grad, name='ts1.grad') - ts2.grad).abs().sum() < 1e-6
 
 if __name__ == "__main__":
