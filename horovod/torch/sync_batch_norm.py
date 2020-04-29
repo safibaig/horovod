@@ -98,7 +98,7 @@ class _SyncBatchNorm(Function):
             # backwards compatibility
             counts_for_bngswc = count_all.view(-1).tolist()
         else:
-            counts_for_bngswc = count_all.view(-1)
+            counts_for_bngswc = count_all.view(-1).float()
 
         # calculate global mean & invstd
         mean, invstd = torch.batch_norm_gather_stats_with_counts(
