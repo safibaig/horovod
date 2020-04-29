@@ -16,6 +16,8 @@
 
 from horovod.torch.mpi_ops import allgather_async, allreduce_async, Sum, size, synchronize
 
+from distutils.version import LooseVersion
+
 import torch
 from torch.autograd.function import Function
 import torch.nn.functional as F
@@ -92,6 +94,12 @@ class _SyncBatchNorm(Function):
         mean_all = synchronize(mean_handle)
         invstd_all = synchronize(invstd_handle)
 
+        if LooseVersion(torch.__version__) < LooseVersion('1.6.0'):
+            # backwards compatibility
+            counts_for_bngswc = count_all.view(-1).tolist()
+        else:
+            counts_for_bngswc = count_all.view(-1)
+
         # calculate global mean & invstd
         mean, invstd = torch.batch_norm_gather_stats_with_counts(
             input,
@@ -101,10 +109,10 @@ class _SyncBatchNorm(Function):
             running_var,
             momentum,
             eps,
-            count_all.view(-1).tolist()
+            counts_for_bngswc
         )
 
-        self.save_for_backward(input, weight, mean, invstd)
+        self.save_for_backward(input, weight, mean, invstd, count_all)
 
         # apply element-wise normalization
         return torch.batch_norm_elemt(input, weight, bias, mean, invstd, eps)
@@ -112,11 +120,11 @@ class _SyncBatchNorm(Function):
     @staticmethod
     def backward(self, grad_output):
         grad_output = grad_output.contiguous()
-        saved_input, weight, mean, invstd = self.saved_tensors
+        saved_input, weight, mean, invstd, count_all = self.saved_tensors
         grad_input = grad_weight = grad_bias = None
 
         # calculate local stats as well as grad_weight / grad_bias
-        mean_dy, mean_dy_xmu, grad_weight, grad_bias = torch.batch_norm_backward_reduce(
+        sum_dy, sum_dy_xmu, grad_weight, grad_bias = torch.batch_norm_backward_reduce(
             grad_output,
             saved_input,
             mean,
@@ -129,12 +137,21 @@ class _SyncBatchNorm(Function):
 
         if self.needs_input_grad[0]:
             # synchronizing stats used to calculate input gradient.
-            mean_dy_handle = allreduce_async(mean_dy, name='sync_batch_norm.mean_dy')
-            mean_dy_xmu_handle = allreduce_async(mean_dy_xmu, name='sync_batch_norm.mean_dy_xmu')
+            sum_dy_handle = allreduce_async(sum_dy, op=Sum, name='sync_batch_norm.sum_dy')
+            sum_dy_xmu_handle = allreduce_async(sum_dy_xmu, op=Sum, name='sync_batch_norm.sum_dy_xmu')
 
             # wait on the async communication to finish
-            mean_dy = synchronize(mean_dy_handle)
-            mean_dy_xmu = synchronize(mean_dy_xmu_handle)
+            sum_dy = synchronize(sum_dy_handle)
+            sum_dy_xmu = synchronize(sum_dy_xmu_handle)
+
+            if LooseVersion(torch.__version__) < LooseVersion('1.6.0'):
+                # before 1.6.0, sum_dy was sum of means from every worker, so we just 
+                # need to divide it by number of workers
+                mean_dy = sum_dy / size()
+                mean_dy_xmu = sum_dy_xmu / size()
+            else:
+                mean_dy = sum_dy / count_all.sum()
+                mean_dy_xmu = sum_dy_xmu / count_all.sum()
 
             # backward pass for gradient calculation
             grad_input = torch.batch_norm_backward_elemt(
